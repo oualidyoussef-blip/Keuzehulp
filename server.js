@@ -265,6 +265,36 @@ async function fetchAndTransformProducts() {
 // zie de TAGS ALS DRAGER VAN SPECS-toelichting hierboven.
 
 // ---------------------------------------------------------------------------
+// DEBUG-ENDPOINT 2 — checkt of een specifiek product al voorkomt in de
+// volledige tags/products-lijst van Lightspeed. Handig om propagatie-
+// vertraging te onderscheiden van een echte bug.
+// Gebruik: https://jouw-domein/api/debug/tags-for/162286158
+// ---------------------------------------------------------------------------
+app.get('/api/debug/tags-for/:productId', async (req, res) => {
+  try {
+    const targetId = req.params.productId;
+    const found = [];
+    let page = 1;
+    let totalScanned = 0;
+    while (true) {
+      const resp = await lsFetch(`/tags/products.json?limit=250&page=${page}`);
+      const assocs = resp.tagsProducts || [];
+      totalScanned += assocs.length;
+      for (const a of assocs) {
+        if (String(a.product?.resource?.id) === String(targetId)) {
+          found.push(a);
+        }
+      }
+      if (assocs.length < 250) break;
+      page++;
+    }
+    res.json({ targetId, totalAssociationsScanned: totalScanned, pagesScanned: page, foundAssociations: found });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // DEBUG-ENDPOINT — tijdelijk, handig om te controleren of tags goed doorkomen
 // zonder de hele keuzehulp-flow te doorlopen. Verwijder dit voordat je
 // definitief live gaat, of zet 'm achter een simpel wachtwoord.
