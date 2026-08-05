@@ -214,16 +214,24 @@ async function fetchAndTransformProducts() {
   const tagTitleMap = await getTagTitleMap();
   const productIdToTagIds = await getAllProductTagIds(); // BUGFIX: zie toelichting hierboven
 
-  // 1. Haal alle zichtbare producten op.
-  //    BEVESTIGD: GET /products.json — bevat GEEN prijs/voorraad, wel
-  //    isVisible/visibility/title/url. Max 250 per call — pagineer met
-  //    ?page=2, ?page=3, etc. als je meer dan 250 relevante producten hebt.
-  const productsResp = await lsFetch('/products.json?limit=250');
-  const rawProducts = (productsResp.products || []).filter(p => p.visibility === 'visible');
+  // 1. Haal ALLE zichtbare producten op — BUGFIX: dit haalde eerder alleen
+  //    de eerste 250 op (?limit=250, zonder paginering). Bij 992 producten
+  //    in de shop viel een deel buiten die eerste pagina, waardoor sommige
+  //    getagde producten nooit werden meegenomen. Nu volledig gepagineerd.
+  const rawProducts = [];
+  let page = 1;
+  while (true) {
+    const productsResp = await lsFetch(`/products.json?limit=250&page=${page}`);
+    const batch = productsResp.products || [];
+    rawProducts.push(...batch);
+    if (batch.length < 250) break;
+    page++;
+  }
+  const visibleProducts = rawProducts.filter(p => p.visibility === 'visible');
 
   const result = [];
 
-  for (const raw of rawProducts) {
+  for (const raw of visibleProducts) {
     // 2. Tags voor dit product opzoeken in de vooraf gebouwde index
     //    (BUGFIX: geen losse call meer per product).
     const tagIds = productIdToTagIds[raw.id] || [];
