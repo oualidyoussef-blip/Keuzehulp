@@ -1,0 +1,240 @@
+/**
+ * KEUZEHULP PROXY — Lightspeed eCom → keuzehulp.html
+ * ----------------------------------------------------------------------------
+ * Doel: nooit de Lightspeed API-credentials in de browser blootstellen.
+ * Deze server haalt live producten + filters + voorraad op, transformeert
+ * ze naar de vorm die keuzehulp.html's MOCK_PRODUCTS al gebruikt, en cachet
+ * het resultaat.
+ *
+ * TE VERIFIËREN VOORDAT JE DIT DRAAIT (zie developers.lightspeedhq.com):
+ *   - Exact auth-schema van jullie account (Basic Auth met key/secret,
+ *     of OAuth2). Pas authHeader() hieronder aan indien nodig.
+ *   - Exacte endpoint-paden en veldnamen (products/variants/stockLevels/filters
+ *     kunnen anders heten of genest zijn in de actuele API-versie).
+ * ----------------------------------------------------------------------------
+ */
+
+const express = require('express');
+const path = require('path');
+const app = express();
+
+// ---------------------------------------------------------------------------
+// STATIC HOSTING — serveert keuzehulp.html vanaf dezelfde server als de API.
+// Zet keuzehulp.html in dezelfde map als dit bestand (server.js).
+// Resultaat: https://jouw-domein.nl/keuzehulp.html
+// Voordeel: same-origin met /api/keuzehulp/products, dus geen CORS nodig.
+// ---------------------------------------------------------------------------
+app.use(express.static(path.join(__dirname)));
+
+// ---------------------------------------------------------------------------
+// CONFIG — zet deze in environment variables, nooit hardcoded in git
+// BEVESTIGD via developers.lightspeedhq.com: EU1-cluster voor .webshopapp.com
+// shops is altijd https://api.webshopapp.com/{taal}/ — dus NIET het eigen
+// shop-subdomein. Jullie shop wordt herkend via de key/secret zelf.
+// ---------------------------------------------------------------------------
+const LIGHTSPEED_API_BASE = process.env.LIGHTSPEED_API_BASE || 'https://api.webshopapp.com/nl';
+const API_KEY    = process.env.LIGHTSPEED_API_KEY;
+const API_SECRET = process.env.LIGHTSPEED_API_SECRET;
+const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minuten — pas aan naar wens
+
+if (!API_KEY || !API_SECRET) {
+  console.error('Ontbrekende LIGHTSPEED_API_KEY / LIGHTSPEED_API_SECRET in environment.');
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// AUTH — BEVESTIGD: HTTP Basic Auth met api_key als username, api_secret als
+// wachtwoord. Geen OAuth2 nodig voor deze klassieke eCom (SEOshop) API.
+// ---------------------------------------------------------------------------
+function authHeader() {
+  const token = Buffer.from(`${API_KEY}:${API_SECRET}`).toString('base64');
+  return `Basic ${token}`;
+}
+
+async function lsFetch(path) {
+  const res = await fetch(`${LIGHTSPEED_API_BASE}${path}`, {
+    headers: {
+      'Authorization': authHeader(),
+      'Accept': 'application/json',
+    },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Lightspeed API ${path} gaf ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// CACHE — simpele in-memory cache, voorkomt rate-limit issues bij elke bezoeker
+// ---------------------------------------------------------------------------
+let cache = { data: null, fetchedAt: 0 };
+
+async function getLiveProducts() {
+  const now = Date.now();
+  if (cache.data && (now - cache.fetchedAt) < CACHE_TTL_MS) {
+    return cache.data;
+  }
+
+  const products = await fetchAndTransformProducts();
+  cache = { data: products, fetchedAt: now };
+  return products;
+}
+
+// ---------------------------------------------------------------------------
+// TRANSFORMATIE — haalt producten + tags + voorraad op en zet ze om naar
+// exact de vorm die keuzehulp.html verwacht:
+//   { id, category, name, specs, price, stock, active, url }
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// TAGS ALS DRAGER VAN SPECS — WAAROM NIET FILTERS
+// ----------------------------------------------------------------------------
+// In de officiële docs (developers.lightspeedhq.com) kon ik geen bevestigd
+// endpoint vinden dat teruggeeft welke Filter-waarden aan een specifiek
+// product hangen (Filter en FilterValue geven alleen de filter-definities
+// en mogelijke waarden, geen per-product koppeling).
+//
+// TagsProduct (/tags/products.json?product={id}) is dat WEL, gedocumenteerd
+// en bevestigd. Daarom gebruikt deze proxy Tags als drager van de specs,
+// via een naamgevingsconventie. De Filters die je al had ingericht blijven
+// gewoon bruikbaar voor het filteren op de website zelf (storefront) — ze
+// worden alleen niet gebruikt door déze proxy.
+//
+// TAG-CONVENTIE (voeg deze tags toe aan de relevante producten in Lightspeed):
+//   category:zonnepanelen | category:batterij | category:omvormer | category:laadpaal
+//   spec:fase:1-fase | spec:fase:3-fase
+//   spec:vermogenwp:440              (zonnepanelen, Wp per paneel)
+//   spec:vermogenkw:5                (omvormer/laadpaal, kW)
+//   spec:capaciteitkwh:10.2          (batterij, kWh)
+//   spec:hybride:true  | spec:hybride:false
+//   spec:slim:true      | spec:slim:false
+//
+// LET OP: dit ís de laatste stap die je zelf moet zetten voordat de matching
+// werkt — zie mijn bericht in de chat voor het volledige stappenplan.
+// ---------------------------------------------------------------------------
+
+let tagCache = { byId: null, fetchedAt: 0 };
+const TAG_CACHE_TTL_MS = 30 * 60 * 1000;
+
+async function getTagTitleMap() {
+  const now = Date.now();
+  if (tagCache.byId && (now - tagCache.fetchedAt) < TAG_CACHE_TTL_MS) {
+    return tagCache.byId;
+  }
+  const byId = {};
+  let page = 1;
+  while (true) {
+    const resp = await lsFetch(`/tags.json?limit=250&page=${page}`);
+    const tags = resp.tags || [];
+    for (const t of tags) byId[t.id] = t.title;
+    if (tags.length < 250) break;
+    page++;
+  }
+  tagCache = { byId, fetchedAt: now };
+  return byId;
+}
+
+// Normaliseert lowercase tag-sleutels (makkelijker te typen bij het taggen)
+// naar de exacte camelCase veldnamen die keuzehulp.html's matching-logica
+// verwacht (zie getMatches()/formatSpecs() in keuzehulp.html).
+const SPEC_KEY_ALIASES = {
+  fase: 'fase',
+  vermogenwp: 'vermogenWp',
+  vermogenkw: 'vermogenKw',
+  capaciteitkwh: 'capaciteitKwh',
+  hybride: 'hybride',
+  slim: 'slim',
+};
+
+async function getParsedTagsForProduct(productId, tagTitleMap) {
+  const resp = await lsFetch(`/tags/products.json?product=${productId}`);
+  const assocs = resp.tagsProducts || [];
+
+  let category = null;
+  const specs = {};
+
+  for (const assoc of assocs) {
+    const tagId = assoc.tag?.resource?.id;
+    const title = tagTitleMap[tagId];
+    if (!title) continue;
+
+    if (title.startsWith('category:')) {
+      category = title.split(':')[1];
+    } else if (title.startsWith('spec:')) {
+      const [, key, ...rest] = title.split(':');
+      const rawValue = rest.join(':'); // voor het geval een waarde zelf een ':' bevat
+      const normalizedKey = SPEC_KEY_ALIASES[key.toLowerCase()] || key;
+      specs[normalizedKey] = parseTagValue(rawValue);
+    }
+  }
+
+  return { category, specs };
+}
+
+function parseTagValue(raw) {
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  const asNumber = parseFloat(raw);
+  if (!isNaN(asNumber) && String(asNumber) === raw) return asNumber;
+  return raw; // bijv. "1-fase" blijft string
+}
+
+async function fetchAndTransformProducts() {
+  const tagTitleMap = await getTagTitleMap();
+
+  // 1. Haal alle zichtbare producten op.
+  //    BEVESTIGD: GET /products.json — bevat GEEN prijs/voorraad, wel
+  //    isVisible/visibility/title/url. Max 250 per call — pagineer met
+  //    ?page=2, ?page=3, etc. als je meer dan 250 relevante producten hebt.
+  const productsResp = await lsFetch('/products.json?limit=250');
+  const rawProducts = (productsResp.products || []).filter(p => p.visibility === 'visible');
+
+  const result = [];
+
+  for (const raw of rawProducts) {
+    // 2. Tags per product ophalen en parsen naar category + specs
+    //    (BEVESTIGD endpoint, zie uitleg hierboven).
+    const { category, specs } = await getParsedTagsForProduct(raw.id, tagTitleMap);
+    if (!category) continue; // product heeft nog geen category:-tag -> sla over
+
+    // 3. Prijs + voorraad zitten op de variant, niet het product.
+    //    BEVESTIGD: GET /variants.json?product={id} → priceIncl, stockLevel.
+    const variantsResp = await lsFetch(`/variants.json?product=${raw.id}`);
+    const variants = variantsResp.variants || [];
+    const totalStock = variants.reduce((sum, v) => sum + (v.stockLevel || 0), 0);
+    const price = variants.length ? parseFloat(variants[0].priceIncl || 0) : 0;
+
+    result.push({
+      id: String(raw.id),
+      category,
+      name: raw.title || raw.fulltitle,
+      specs,
+      price,
+      stock: totalStock,
+      active: raw.isVisible !== false,
+      url: raw.url ? `https://www.solar-outlet.nl/${raw.url}.html` : '#',
+    });
+  }
+
+  return result;
+}
+
+// mapCategoryFromFilters() en mapSpecsFromFilters() zijn vervallen —
+// category en specs komen nu rechtstreeks uit getParsedTagsForProduct(),
+// zie de TAGS ALS DRAGER VAN SPECS-toelichting hierboven.
+
+// ---------------------------------------------------------------------------
+// ROUTE — dit is wat keuzehulp.html's fetchLiveProducts() straks aanroept
+// ---------------------------------------------------------------------------
+app.get('/api/keuzehulp/products', async (req, res) => {
+  try {
+    const products = await getLiveProducts();
+    res.json(products);
+  } catch (err) {
+    console.error(err);
+    res.status(502).json({ error: 'Kon actueel assortiment niet laden' });
+  }
+});
+
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log(`Keuzehulp-proxy draait op poort ${PORT}`));
