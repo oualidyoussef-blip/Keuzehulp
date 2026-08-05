@@ -146,15 +146,46 @@ const SPEC_KEY_ALIASES = {
   slim: 'slim',
 };
 
-async function getParsedTagsForProduct(productId, tagTitleMap) {
-  const resp = await lsFetch(`/tags/products.json?product=${productId}`);
-  const assocs = resp.tagsProducts || [];
+// ---------------------------------------------------------------------------
+// ALLE TAG-PRODUCTKOPPELINGEN IN ÉÉN KEER OPHALEN
+// ----------------------------------------------------------------------------
+// LET OP / BUGFIX: eerder vertrouwde dit op GET /tags/products.json?product={id}
+// om alleen de koppelingen van dat ene product terug te krijgen. Die filter
+// stond wel in een voorbeeld-link in de docs, maar was niet bevestigd als
+// ondersteunde filter op dit endpoint. Als hij in de praktijk niet werkt,
+// kreeg elk product de ongefilterde (gepagineerde) lijst van de hele shop
+// terug, en werd de koppeling nooit gelegd -> category bleef null -> product
+// werd overgeslagen. Dit is vermoedelijk de oorzaak als je "geen producten"
+// zag ondanks correct getagde producten.
+//
+// Oplossing: haal ALLE tagsProducts-koppelingen op (gepagineerd, net als
+// getTagTitleMap hierboven) en bouw zelf een productId -> [tagIds] index.
+// Werkt gegarandeerd correct, ongeacht of de product-filter ondersteund wordt.
+// ---------------------------------------------------------------------------
+async function getAllProductTagIds() {
+  const productIdToTagIds = {};
+  let page = 1;
+  while (true) {
+    const resp = await lsFetch(`/tags/products.json?limit=250&page=${page}`);
+    const assocs = resp.tagsProducts || [];
+    for (const a of assocs) {
+      const productId = a.product?.resource?.id;
+      const tagId = a.tag?.resource?.id;
+      if (!productId || !tagId) continue;
+      if (!productIdToTagIds[productId]) productIdToTagIds[productId] = [];
+      productIdToTagIds[productId].push(tagId);
+    }
+    if (assocs.length < 250) break;
+    page++;
+  }
+  return productIdToTagIds;
+}
 
+function parseCategoryAndSpecs(tagIds, tagTitleMap) {
   let category = null;
   const specs = {};
 
-  for (const assoc of assocs) {
-    const tagId = assoc.tag?.resource?.id;
+  for (const tagId of tagIds) {
     const title = tagTitleMap[tagId];
     if (!title) continue;
 
@@ -162,7 +193,7 @@ async function getParsedTagsForProduct(productId, tagTitleMap) {
       category = title.split(':')[1];
     } else if (title.startsWith('spec:')) {
       const [, key, ...rest] = title.split(':');
-      const rawValue = rest.join(':'); // voor het geval een waarde zelf een ':' bevat
+      const rawValue = rest.join(':');
       const normalizedKey = SPEC_KEY_ALIASES[key.toLowerCase()] || key;
       specs[normalizedKey] = parseTagValue(rawValue);
     }
@@ -181,6 +212,7 @@ function parseTagValue(raw) {
 
 async function fetchAndTransformProducts() {
   const tagTitleMap = await getTagTitleMap();
+  const productIdToTagIds = await getAllProductTagIds(); // BUGFIX: zie toelichting hierboven
 
   // 1. Haal alle zichtbare producten op.
   //    BEVESTIGD: GET /products.json — bevat GEEN prijs/voorraad, wel
@@ -192,9 +224,10 @@ async function fetchAndTransformProducts() {
   const result = [];
 
   for (const raw of rawProducts) {
-    // 2. Tags per product ophalen en parsen naar category + specs
-    //    (BEVESTIGD endpoint, zie uitleg hierboven).
-    const { category, specs } = await getParsedTagsForProduct(raw.id, tagTitleMap);
+    // 2. Tags voor dit product opzoeken in de vooraf gebouwde index
+    //    (BUGFIX: geen losse call meer per product).
+    const tagIds = productIdToTagIds[raw.id] || [];
+    const { category, specs } = parseCategoryAndSpecs(tagIds, tagTitleMap);
     if (!category) continue; // product heeft nog geen category:-tag -> sla over
 
     // 3. Prijs + voorraad zitten op de variant, niet het product.
@@ -222,6 +255,22 @@ async function fetchAndTransformProducts() {
 // mapCategoryFromFilters() en mapSpecsFromFilters() zijn vervallen —
 // category en specs komen nu rechtstreeks uit getParsedTagsForProduct(),
 // zie de TAGS ALS DRAGER VAN SPECS-toelichting hierboven.
+
+// ---------------------------------------------------------------------------
+// DEBUG-ENDPOINT — tijdelijk, handig om te controleren of tags goed doorkomen
+// zonder de hele keuzehulp-flow te doorlopen. Verwijder dit voordat je
+// definitief live gaat, of zet 'm achter een simpel wachtwoord.
+// Gebruik: https://jouw-domein/api/debug/products
+// ---------------------------------------------------------------------------
+app.get('/api/debug/products', async (req, res) => {
+  try {
+    cache = { data: null, fetchedAt: 0 }; // forceer een verse call, negeer cache
+    const products = await getLiveProducts();
+    res.json({ count: products.length, products });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // ROUTE — dit is wat keuzehulp.html's fetchLiveProducts() straks aanroept
