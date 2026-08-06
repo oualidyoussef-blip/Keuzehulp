@@ -265,6 +265,20 @@ async function fetchAndTransformProducts() {
 // zie de TAGS ALS DRAGER VAN SPECS-toelichting hierboven.
 
 // ---------------------------------------------------------------------------
+// DEBUG-ENDPOINT 4 — toont de ruwe productdata zoals Lightspeed die teruggeeft,
+// met name het 'visibility'-veld waarop fetchAndTransformProducts filtert.
+// Gebruik: https://jouw-domein/api/debug/product-raw/162286158
+// ---------------------------------------------------------------------------
+app.get('/api/debug/product-raw/:productId', async (req, res) => {
+  try {
+    const resp = await lsFetch(`/products/${req.params.productId}.json`);
+    res.json(resp);
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // DEBUG-ENDPOINT 3 — laat precies zien wat de proxy van de tags van één
 // product maakt: welke tag-ID's gevonden zijn, welke titel elke ID heeft,
 // en welke category/specs daar uiteindelijk uitrollen. Dit isoleert of het
