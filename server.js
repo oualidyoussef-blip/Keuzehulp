@@ -227,7 +227,11 @@ async function fetchAndTransformProducts() {
     if (batch.length < 250) break;
     page++;
   }
-  const visibleProducts = rawProducts.filter(p => p.visibility === 'visible');
+  // BUGFIX: 'visibility' is de configuratie-modus ('visible'/'hidden'/'auto'),
+  // niet de daadwerkelijke status. Een product op 'auto' met isVisible:true
+  // is écht zichtbaar, maar werd hier onterecht uitgesloten. 'isVisible' is
+  // het juiste veld om op te filteren.
+  const visibleProducts = rawProducts.filter(p => p.isVisible === true);
 
   const result = [];
 
