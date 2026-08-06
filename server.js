@@ -265,6 +265,28 @@ async function fetchAndTransformProducts() {
 // zie de TAGS ALS DRAGER VAN SPECS-toelichting hierboven.
 
 // ---------------------------------------------------------------------------
+// DEBUG-ENDPOINT 3 — laat precies zien wat de proxy van de tags van één
+// product maakt: welke tag-ID's gevonden zijn, welke titel elke ID heeft,
+// en welke category/specs daar uiteindelijk uitrollen. Dit isoleert of het
+// probleem in het ophalen zit, of in het interpreteren van de tags.
+// Gebruik: https://jouw-domein/api/debug/parsed-tags-for/162286158
+// ---------------------------------------------------------------------------
+app.get('/api/debug/parsed-tags-for/:productId', async (req, res) => {
+  try {
+    const targetId = req.params.productId;
+    tagCache = { byId: null, fetchedAt: 0 }; // BUGFIX: zie toelichting bij /api/debug/products
+    const tagTitleMap = await getTagTitleMap();
+    const productIdToTagIds = await getAllProductTagIds();
+    const tagIds = productIdToTagIds[targetId] || productIdToTagIds[Number(targetId)] || [];
+    const resolvedTitles = tagIds.map(id => ({ tagId: id, title: tagTitleMap[id] ?? '(GEEN TITEL GEVONDEN VOOR DIT ID)' }));
+    const { category, specs } = parseCategoryAndSpecs(tagIds, tagTitleMap);
+    res.json({ targetId, tagIds, resolvedTitles, resultingCategory: category, resultingSpecs: specs });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // DEBUG-ENDPOINT 2 — checkt of een specifiek product al voorkomt in de
 // volledige tags/products-lijst van Lightspeed. Handig om propagatie-
 // vertraging te onderscheiden van een echte bug.
@@ -302,7 +324,10 @@ app.get('/api/debug/tags-for/:productId', async (req, res) => {
 // ---------------------------------------------------------------------------
 app.get('/api/debug/products', async (req, res) => {
   try {
-    cache = { data: null, fetchedAt: 0 }; // forceer een verse call, negeer cache
+    cache = { data: null, fetchedAt: 0 };       // forceer verse productdata
+    tagCache = { byId: null, fetchedAt: 0 };    // BUGFIX: forceer ook verse tag-naam-vertaling —
+                                                  // anders blijven gloednieuwe tag-namen onzichtbaar
+                                                  // tot de 30-min cache toevallig verloopt.
     const products = await getLiveProducts();
     res.json({ count: products.length, products });
   } catch (err) {
