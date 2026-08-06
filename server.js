@@ -258,6 +258,7 @@ async function fetchAndTransformProducts() {
       stock: totalStock,
       active: raw.isVisible !== false,
       url: raw.url ? `https://www.solar-outlet.nl/${raw.url}.html` : '#',
+      image: raw.image?.src || raw.image?.thumb || null, // zit al standaard in de productdata, geen extra call nodig
     });
   }
 
