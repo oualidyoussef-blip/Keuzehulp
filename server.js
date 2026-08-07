@@ -19,6 +19,40 @@ const path = require('path');
 const app = express();
 
 // ---------------------------------------------------------------------------
+// DEBUG-ENDPOINTS BEVEILIGEN — deze routes geven je volledige productcatalogus,
+// prijzen en interne tag-structuur bloot, en negeren bewust de cache (dus
+// zwaarder voor de Lightspeed API bij elk bezoek). Daarom nu achter een
+// wachtwoord via HTTP Basic Auth.
+//
+// Zet DEBUG_PASSWORD als environment variable op je hosting (Render:
+// Environment → Add Environment Variable). Gebruikersnaam maakt niet uit,
+// vul iets in zoals "admin".
+// ---------------------------------------------------------------------------
+const DEBUG_PASSWORD = process.env.DEBUG_PASSWORD;
+
+function requireDebugAuth(req, res, next) {
+  if (!DEBUG_PASSWORD) {
+    // Geen wachtwoord ingesteld op de server -> debug-routes blijven dicht,
+    // veiliger dan per ongeluk open laten staan.
+    return res.status(503).json({ error: 'DEBUG_PASSWORD is niet ingesteld op de server. Debug-endpoints zijn daardoor uitgeschakeld.' });
+  }
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Basic ')) {
+    res.set('WWW-Authenticate', 'Basic realm="Keuzehulp debug"');
+    return res.status(401).send('Authenticatie vereist.');
+  }
+  const decoded = Buffer.from(authHeader.slice(6), 'base64').toString('utf8');
+  const [, password] = decoded.split(':'); // gebruikersnaam wordt genegeerd, alleen wachtwoord checken
+  if (password !== DEBUG_PASSWORD) {
+    res.set('WWW-Authenticate', 'Basic realm="Keuzehulp debug"');
+    return res.status(401).send('Onjuist wachtwoord.');
+  }
+  next();
+}
+
+app.use('/api/debug', requireDebugAuth);
+
+// ---------------------------------------------------------------------------
 // STATIC HOSTING — serveert keuzehulp.html vanaf dezelfde server als de API.
 // Zet keuzehulp.html in dezelfde map als dit bestand (server.js).
 // Resultaat: https://jouw-domein.nl/keuzehulp.html
