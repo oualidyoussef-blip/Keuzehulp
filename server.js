@@ -69,7 +69,7 @@ app.use(express.static(path.join(__dirname)));
 const LIGHTSPEED_API_BASE = process.env.LIGHTSPEED_API_BASE || 'https://api.webshopapp.com/nl';
 const API_KEY    = process.env.LIGHTSPEED_API_KEY;
 const API_SECRET = process.env.LIGHTSPEED_API_SECRET;
-const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minuten — pas aan naar wens
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 uur — verhoogd vanaf 30 min als extra buffer tegen rate limits
 
 if (!API_KEY || !API_SECRET) {
   console.error('Ontbrekende LIGHTSPEED_API_KEY / LIGHTSPEED_API_SECRET in environment.');
@@ -148,7 +148,7 @@ async function getLiveProducts() {
 // ---------------------------------------------------------------------------
 
 let tagCache = { byId: null, fetchedAt: 0 };
-const TAG_CACHE_TTL_MS = 30 * 60 * 1000;
+const TAG_CACHE_TTL_MS = 60 * 60 * 1000; // 1 uur — zelfde als CACHE_TTL_MS, blijft synchroon
 
 async function getTagTitleMap() {
   const now = Date.now();
