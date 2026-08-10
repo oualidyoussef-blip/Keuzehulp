@@ -267,6 +267,30 @@ async function fetchAndTransformProducts() {
   // het juiste veld om op te filteren.
   const visibleProducts = rawProducts.filter(p => p.isVisible === true);
 
+  // ---------------------------------------------------------------------------
+  // BUGFIX (root cause van de 429-rate-limit-fouten): dit deed voorheen ÉÉN
+  // losse /variants.json-call PER product (233+ calls in totaal, plus alle
+  // calls voor producten/tags/koppelingen — samen 240+ verzoeken in één keer,
+  // telkens als de cache leeg was). Nu: alle variants in één keer opgehaald
+  // en per product-ID geïndexeerd, net als bij de tags.
+  // ---------------------------------------------------------------------------
+  const productIdToVariants = {};
+  {
+    let vPage = 1;
+    while (true) {
+      const variantsResp = await lsFetch(`/variants.json?limit=250&page=${vPage}`);
+      const batch = variantsResp.variants || [];
+      for (const v of batch) {
+        const pid = v.product?.resource?.id;
+        if (!pid) continue;
+        if (!productIdToVariants[pid]) productIdToVariants[pid] = [];
+        productIdToVariants[pid].push(v);
+      }
+      if (batch.length < 250) break;
+      vPage++;
+    }
+  }
+
   const result = [];
 
   for (const raw of visibleProducts) {
@@ -276,10 +300,9 @@ async function fetchAndTransformProducts() {
     const { category, specs } = parseCategoryAndSpecs(tagIds, tagTitleMap);
     if (!category) continue; // product heeft nog geen category:-tag -> sla over
 
-    // 3. Prijs + voorraad zitten op de variant, niet het product.
-    //    BEVESTIGD: GET /variants.json?product={id} → priceIncl, stockLevel.
-    const variantsResp = await lsFetch(`/variants.json?product=${raw.id}`);
-    const variants = variantsResp.variants || [];
+    // 3. Prijs + voorraad zitten op de variant, niet het product — nu uit de
+    //    vooraf gebouwde index (BUGFIX: geen losse call meer per product).
+    const variants = productIdToVariants[raw.id] || [];
     const totalStock = variants.reduce((sum, v) => sum + (v.stockLevel || 0), 0);
     const price = variants.length ? parseFloat(variants[0].priceIncl || 0) : 0;
 
