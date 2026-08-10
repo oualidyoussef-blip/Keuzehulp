@@ -103,16 +103,43 @@ async function lsFetch(path) {
 // CACHE — simpele in-memory cache, voorkomt rate-limit issues bij elke bezoeker
 // ---------------------------------------------------------------------------
 let cache = { data: null, fetchedAt: 0 };
+let backgroundRefreshInProgress = false;
+
+async function refreshCacheInBackground() {
+  if (backgroundRefreshInProgress) return; // voorkomt dat meerdere verzoeken tegelijk een refresh starten
+  backgroundRefreshInProgress = true;
+  try {
+    const products = await fetchAndTransformProducts();
+    cache = { data: products, fetchedAt: Date.now() };
+  } catch (err) {
+    console.error('Achtergrond-refresh van de cache mislukt:', err.message);
+    // cache.data blijft staan (oude data) zodat bezoekers niets merken van deze mislukking
+  } finally {
+    backgroundRefreshInProgress = false;
+  }
+}
 
 async function getLiveProducts() {
   const now = Date.now();
-  if (cache.data && (now - cache.fetchedAt) < CACHE_TTL_MS) {
-    return cache.data;
+
+  if (!cache.data) {
+    // Allereerste keer sinds de server is opgestart: nog niets om te tonen,
+    // dus nu moeten we wél wachten op de eerste fetch.
+    const products = await fetchAndTransformProducts();
+    cache = { data: products, fetchedAt: now };
+    return products;
   }
 
-  const products = await fetchAndTransformProducts();
-  cache = { data: products, fetchedAt: now };
-  return products;
+  if ((now - cache.fetchedAt) >= CACHE_TTL_MS) {
+    // SNELHEIDSFIX (stale-while-revalidate): cache is verlopen, maar we hebben
+    // nog wel (net iets oudere) data. In plaats van de bezoeker te laten
+    // wachten op een verse fetch, tonen we meteen de bestaande data en
+    // verversen we op de achtergrond voor de VOLGENDE bezoeker. Zo wacht
+    // vrijwel niemand meer op een cache-miss.
+    refreshCacheInBackground(); // bewust niet awaiten
+  }
+
+  return cache.data;
 }
 
 // ---------------------------------------------------------------------------
@@ -244,14 +271,8 @@ function parseTagValue(raw) {
   return raw; // bijv. "1-fase" blijft string
 }
 
-async function fetchAndTransformProducts() {
-  const tagTitleMap = await getTagTitleMap();
-  const productIdToTagIds = await getAllProductTagIds(); // BUGFIX: zie toelichting hierboven
-
-  // 1. Haal ALLE zichtbare producten op — BUGFIX: dit haalde eerder alleen
-  //    de eerste 250 op (?limit=250, zonder paginering). Bij 992 producten
-  //    in de shop viel een deel buiten die eerste pagina, waardoor sommige
-  //    getagde producten nooit werden meegenomen. Nu volledig gepagineerd.
+// Producten ophalen (los getrokken zodat dit parallel met de andere calls kan lopen)
+async function getAllProducts() {
   const rawProducts = [];
   let page = 1;
   while (true) {
@@ -261,35 +282,50 @@ async function fetchAndTransformProducts() {
     if (batch.length < 250) break;
     page++;
   }
+  return rawProducts;
+}
+
+// Voorraad/prijs ophalen en indexeren per product-ID (los getrokken, zie hierboven)
+async function getAllVariantsIndexed() {
+  const productIdToVariants = {};
+  let vPage = 1;
+  while (true) {
+    const variantsResp = await lsFetch(`/variants.json?limit=250&page=${vPage}`);
+    const batch = variantsResp.variants || [];
+    for (const v of batch) {
+      const pid = v.product?.resource?.id;
+      if (!pid) continue;
+      if (!productIdToVariants[pid]) productIdToVariants[pid] = [];
+      productIdToVariants[pid].push(v);
+    }
+    if (batch.length < 250) break;
+    vPage++;
+  }
+  return productIdToVariants;
+}
+
+async function fetchAndTransformProducts() {
+  // ---------------------------------------------------------------------------
+  // SNELHEIDSFIX: deze vier datasets (tag-namen, tag-koppelingen, producten,
+  // voorraad) zijn onderling onafhankelijk — geen van alle heeft de uitkomst
+  // van een ander nodig totdat we ze hieronder combineren. Voorheen liepen ze
+  // na elkaar (elk met eigen paginering, dus meerdere Lightspeed-calls op
+  // een rij), wat bij een cache-miss een paar seconden wachttijd opleverde.
+  // Nu lopen ze parallel via Promise.all — de totale wachttijd wordt bepaald
+  // door de traagste van de vier, niet door de som van allemaal.
+  // ---------------------------------------------------------------------------
+  const [tagTitleMap, productIdToTagIds, rawProducts, productIdToVariants] = await Promise.all([
+    getTagTitleMap(),
+    getAllProductTagIds(), // BUGFIX: zie toelichting hierboven
+    getAllProducts(),
+    getAllVariantsIndexed(),
+  ]);
+
   // BUGFIX: 'visibility' is de configuratie-modus ('visible'/'hidden'/'auto'),
   // niet de daadwerkelijke status. Een product op 'auto' met isVisible:true
   // is écht zichtbaar, maar werd hier onterecht uitgesloten. 'isVisible' is
   // het juiste veld om op te filteren.
   const visibleProducts = rawProducts.filter(p => p.isVisible === true);
-
-  // ---------------------------------------------------------------------------
-  // BUGFIX (root cause van de 429-rate-limit-fouten): dit deed voorheen ÉÉN
-  // losse /variants.json-call PER product (233+ calls in totaal, plus alle
-  // calls voor producten/tags/koppelingen — samen 240+ verzoeken in één keer,
-  // telkens als de cache leeg was). Nu: alle variants in één keer opgehaald
-  // en per product-ID geïndexeerd, net als bij de tags.
-  // ---------------------------------------------------------------------------
-  const productIdToVariants = {};
-  {
-    let vPage = 1;
-    while (true) {
-      const variantsResp = await lsFetch(`/variants.json?limit=250&page=${vPage}`);
-      const batch = variantsResp.variants || [];
-      for (const v of batch) {
-        const pid = v.product?.resource?.id;
-        if (!pid) continue;
-        if (!productIdToVariants[pid]) productIdToVariants[pid] = [];
-        productIdToVariants[pid].push(v);
-      }
-      if (batch.length < 250) break;
-      vPage++;
-    }
-  }
 
   const result = [];
 
