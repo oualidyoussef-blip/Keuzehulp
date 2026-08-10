@@ -293,6 +293,14 @@ async function fetchAndTransformProducts() {
 
   const result = [];
 
+  // Herkent een kWh-waarde in een varianttitel, bijv. "Solarbank Max AC - 14KWh" -> 14
+  function parseCapacityFromVariantTitle(title) {
+    if (!title) return null;
+    const m = title.match(/(\d+(?:[.,]\d+)?)\s*k\s*wh/i);
+    if (!m) return null;
+    return parseFloat(m[1].replace(',', '.'));
+  }
+
   for (const raw of visibleProducts) {
     // 2. Tags voor dit product opzoeken in de vooraf gebouwde index
     //    (BUGFIX: geen losse call meer per product).
@@ -300,9 +308,43 @@ async function fetchAndTransformProducts() {
     const { category, specs } = parseCategoryAndSpecs(tagIds, tagTitleMap);
     if (!category) continue; // product heeft nog geen category:-tag -> sla over
 
+    const variants = productIdToVariants[raw.id] || [];
+
+    // ---------------------------------------------------------------------------
+    // VARIANT-EXPANSIE — sommige batterijen (bijv. Anker Solarbank MAX AC) zijn
+    // uitbreidbaar: één product met meerdere varianten die elk een eigen
+    // capaciteit EN prijs hebben (7/14/21/28/35/42 kWh). Voorheen pakten we
+    // alleen de eerste variant, waardoor de grotere (en vaak beter passende)
+    // uitbreidingen nooit in het advies verschenen. Als we in de varianttitels
+    // verschillende kWh-waarden herkennen, tonen we elke variant als eigen
+    // keuze-optie i.p.v. ze samen te voegen tot één rij.
+    // ---------------------------------------------------------------------------
+    const variantCapacities = category === 'batterij'
+      ? variants.map(v => parseCapacityFromVariantTitle(v.title)).filter(c => c !== null)
+      : [];
+    const hasDistinctVariantCapacities = new Set(variantCapacities).size > 1;
+
+    if (hasDistinctVariantCapacities) {
+      for (const v of variants) {
+        const cap = parseCapacityFromVariantTitle(v.title);
+        if (cap === null) continue; // variant zonder herkenbare capaciteit overslaan
+        result.push({
+          id: `${raw.id}-${v.id}`,
+          category,
+          name: `${raw.title || raw.fulltitle} (${v.title.replace(/^.*-\s*/, '').trim()})`,
+          specs: { ...specs, capaciteitKwh: cap },
+          price: parseFloat(v.priceIncl || 0),
+          stock: v.stockLevel || 0,
+          active: raw.isVisible !== false,
+          url: raw.url ? `https://www.solar-outlet.nl/${raw.url}.html` : '#',
+          image: raw.image?.src || raw.image?.thumb || null,
+        });
+      }
+      continue; // dit product is al toegevoegd als losse varianten, niet nog eens als geheel
+    }
+
     // 3. Prijs + voorraad zitten op de variant, niet het product — nu uit de
     //    vooraf gebouwde index (BUGFIX: geen losse call meer per product).
-    const variants = productIdToVariants[raw.id] || [];
     const totalStock = variants.reduce((sum, v) => sum + (v.stockLevel || 0), 0);
     const price = variants.length ? parseFloat(variants[0].priceIncl || 0) : 0;
 
