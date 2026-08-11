@@ -61,6 +61,16 @@ app.use('/api/debug', requireDebugAuth);
 app.use(express.static(path.join(__dirname)));
 
 // ---------------------------------------------------------------------------
+// HEALTH CHECK — bedoeld voor een externe keep-alive-ping (bijv. UptimeRobot
+// of cron-job.org), zodat Render's gratis tier niet inslaapt na inactiviteit.
+// Doet BEWUST geen Lightspeed-calls, dus kost geen rate-limit-budget.
+// Zet hier de URL van dit endpoint in bij je keep-alive-dienst, elke 10-14 min.
+// ---------------------------------------------------------------------------
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', time: new Date().toISOString() });
+});
+
+// ---------------------------------------------------------------------------
 // CONFIG — zet deze in environment variables, nooit hardcoded in git
 // BEVESTIGD via developers.lightspeedhq.com: EU1-cluster voor .webshopapp.com
 // shops is altijd https://api.webshopapp.com/{taal}/ — dus NIET het eigen
